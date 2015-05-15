@@ -1,0 +1,290 @@
+---
+title: "Practical Machine Learning - Project"
+author: "Geoff Freedman"
+date: "May 15, 2015"
+output: html_document
+---
+
+________________________________________________________________________________________________
+## Overview of Project:
+________________________________________________________________________________________________
+
+
+*Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).*
+
+*The goal of your project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set. You may use any of the other variables to predict with. You should create a report describing how you built your model, how you used cross validation, what you think the expected out of sample error is, and why you made the choices you did. You will also use your prediction model to predict 20 different test cases.* 
+
+________________________________________________________________________________________________
+## 01) Loading and Pre-Processing the data:
+________________________________________________________________________________________________
+
+
+____________
+#### 01a -> Administrative Stuff:
+____________
+
+
+```{r, echo=TRUE ,cache=TRUE}
+setwd("/Users/freeg007/Documents/Coursera/Johns\ Hopkins\ University/Data\ Science/Practical\ Machine\ Learning")
+getwd()
+
+# Install and load the necessary R packages:
+library(caret)
+library(corrplot)
+library(RColorBrewer)
+library(randomForest)
+library(tree)
+library(ggplot2)
+```
+
+
+____________
+#### 01b -> Download and parse the data:
+____________
+
+
+```{r, echo=TRUE, cache=TRUE}
+### Download and parse the data:
+
+# Where to get data:
+trainURL <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv'
+testURL <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv'
+
+# Download train and test data:
+localTrainFile <- "pml-training.csv"
+localTestFile <- "pml-testing.csv"
+
+# Check to see if we have the train file:
+if(!file.exists(localTrainFile)){
+  print("downloading TRAIN data....")
+  download.file(trainURL, localTrainFile, method = "curl")
+}
+
+# Check to see if we have the test file:
+if(!file.exists(localTestFile)){
+  print("downloading TEST data....")
+  download.file(testURL, localTestFile, method = "curl")
+}
+
+# Parse the CSV into a data.frame object:
+trainData <- read.csv(localTrainFile, header = TRUE, na.strings = c("NA", ""))
+
+# Parse the CSV into a data.frame object:
+testData <- read.csv(localTestFile, header = TRUE, na.strings = c("NA", ""))
+dim(trainData)
+
+```
+
+
+
+*So we have 19622 rows and 160 columns, looking at head(trainData,10) I see a lot of missing values...*
+
+
+____________
+#### 01c -> Now we have the data fully loaded in and ready for our pre-processing:
+____________
+
+
+```{r, echo=TRUE, cache=TRUE}
+# Look at all of the different output variables for the outcome variable 'classe'
+summary(trainData$classe)
+dim(trainData)
+
+# Clean the data as we have lots of NAs in some columns:
+trainData <- trainData[, colSums(is.na(trainData)) == 0]
+dim(trainData)
+
+# Now get rid of columns that don't have any predictive value for us:
+removeCols = c('X', 'user_name', 'raw_timestamp_part_1', 'raw_timestamp_part_2', 'cvtd_timestamp', 'new_window', 'num_window')
+trainData <- trainData[, -which(names(trainData) %in% removeCols)]
+dim(trainData)
+
+```
+
+
+*We still have 19622 rows, but have culled our columns to 53 which should make our analysis go much smoother.*
+
+
+____________
+#### 01d -> Look for predictor variables that are colinear or are highly correlated with each other:
+____________
+
+
+*Here we're on the look out for larger circles in <span style="color:blue">blue</span> or <span style="color:red">red</span>, this means the predictors on each axis have a high degree of correlation with each other. Please note that a predictors will have a 1:1 correlation with itself...*
+
+
+```{r, echo=TRUE, ,cache=TRUE, fig.width=9, fig.height=10}
+
+# We use the is.numeric flag to make sure we don't accidentally correlated our factor 'classe' variable with anything as it's an outcome:
+corrMatrix <- cor(na.omit(trainData[sapply(trainData, is.numeric)]))
+plotitupson <- corrplot(corrMatrix, order = "FPC", method = "circle", sig.level = 0.01, insig = "blank", type = "upper", col=brewer.pal(n=8, name="Spectral"), tl.cex = 0.8, tl.col = rgb(0, 0, 0))
+
+```
+
+
+____________
+#### 01e ->  Remove variables that are highly correlated with each other:
+____________
+
+
+```{r, echo=TRUE, cache=TRUE}
+
+# We're going to use 90% as a cutoff value:
+removecor <- findCorrelation(corrMatrix, cutoff = .90, verbose = FALSE)
+trainData <- trainData[,-removecor]
+dim(trainData)
+
+```
+
+
+### At this point data is sufficiently cleaned for analysis!!! #Yeah!
+
+________________________________________________________________________________________________
+## 02) Analysis with Cross Validation
+________________________________________________________________________________________________
+
+
+____________
+#### 02a ->  Split Our Test Data Set Into Sub Test and Training Sets
+____________
+
+
+*We're going to split our large training set into a 70/30 split for cross validation. Because we have almost 20,000 total rows, this should give us enough data in the sub-test set to have confidence that our findings in the sub-training set actualy reflect reality and we aren't just overfitting our model. ~6000 rows in the sub-test set feels like we can have confidence comparing the test and training sets.*
+
+
+```{r, echo=TRUE, cache=TRUE}
+
+# We split training into sub train and test groups for cross validation:
+inTrain <- createDataPartition(y=trainData$classe, p=0.7, list=FALSE)
+training <- trainData[inTrain,] 
+testing <- trainData[-inTrain,]
+dim(training)
+dim(testing)
+
+```
+
+
+*Again, we made out sub-test test 30% of the original training size, with the 70% balance going to the new sub-training set*
+
+____________
+#### 02b ->  Decision Trees as EDA
+____________
+
+
+```{r, echo=TRUE, cache=TRUE, fig.width=9, fig.height=10}
+
+# Let's run a tree algorithm on our training set:
+tree.training <- tree(classe~.,data=training)
+summary(tree.training)
+
+plot(tree.training)
+text(tree.training,pretty=0, cex =.8)
+
+```
+
+
+*This almost like using Exploratory Data Analysis for Machine Learning. Here we now see the 'lay of the land' of where all of our predictors sit in predicting the proper way (classe A) to do the exercise. It looks like <b>'pitch_foream'</b> is the most important predictor.. but more on that later*
+
+
+____________
+#### 02c ->  Cross Validation on Decision Trees
+____________
+
+
+```{r, echo=TRUE, cache=TRUE}
+
+# We are going to check the performance of the tree on the testing data by cross validation.
+tree.pred <- predict(tree.training, testing, type="class")
+predMatrix <- with(testing, table(tree.pred,classe))
+errorRate <- sum(diag(predMatrix))/sum(as.vector(predMatrix)) 
+errorRate
+
+```
+
+
+*Let's prune the tree again to see what happens to the error rate of <b>~70%</b>*
+
+
+```{r, echo=TRUE, cache=TRUE}
+
+# Let's try to prune the tree to get a better number than 0.72
+prune.training <- prune.misclass(tree.training,best=10)
+tree.pred <- predict(prune.training,testing,type="class")
+predMatrix <-  with(testing,table(tree.pred,classe))
+errorRate <- sum(diag(predMatrix))/sum(as.vector(predMatrix)) 
+errorRate
+
+```
+
+
+*Plot the tree below:*
+
+
+```{r, echo=TRUE, cache=TRUE, fig.width=9, fig.height=10}
+
+plot(prune.training)
+text(prune.training,pretty=0, cex =.8)
+
+```
+
+
+*The error rate of around <b>~56%</b> is probably unacceptably high but the main takeaways remaing intact ( so the model is more interpretable ). It still looks like <b>'pitch_foream'</b> is the most important predictor (if you mainly care about getting outcome A that is). Let's improve things with a Random Forest Algorithm to try and get the best of both worlds....*
+
+
+____________
+#### 02d ->  Random Forest on Training Set
+____________
+
+
+```{r, echo=TRUE, cache=TRUE, fig.width=9, fig.height=10}
+
+# Try a Random Forest:
+set.seed(19911991)
+rf.training <- randomForest(classe~., data=training, ntree=100, importance=TRUE)
+rf.training
+varImpPlot(rf.training, main = 'Importance Ranking of Predictors In Random Forest', cex=0.8, pch=19, color='purple')
+
+```
+
+
+*Now we have a more interpretable ranked set of predictors.*
+*These predictors look interesting:*
+
++ yaw_belt
++ magnet_dumbell_z
++ pitch_belt
++ magnet_dumbell_y
++ pitch_forearm
+
+*Let's test them out below.*
+
+
+____________
+#### 02e ->  Out of Sample Accuracy for Random Forest Model:
+____________
+
+
+```{r, echo=TRUE, cache=TRUE}
+# We calculate the out of sample accuracy of the model. In other words, this describes how accurately the model performs on the 30% testing dataset:
+tree.pred <- predict(rf.training,testing,type="class")
+# Run a confusion matrix:
+confusionMatrix(tree.pred , testing$classe)
+```
+
+
+*Our out of sample accuracy is <b>99.59%</b> which feels like a good number especially considering the accuracy rates above.*     
+
+
+____________
+#### 03 ->  Answers
+____________
+
+
+```{r, echo=TRUE, cache=TRUE}
+
+# We can apply the above model to predict on the test set:
+answers <- predict(rf.training, testData)
+answers
+
+```
+
